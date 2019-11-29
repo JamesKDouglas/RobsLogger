@@ -1,5 +1,5 @@
 # RobsLogger
-This repository is for a data logger using a Particle Electron. 
+This repository is for a data logger using a Particle Electron. It sends data over the cellphone network.
 
 The logger uses an SHT20 in a housing (called an SEN0227) to gather temperature and humidity data then records data to ThingSpeak and SD card. It sleeps between readings.
 
