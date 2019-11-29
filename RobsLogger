@@ -1,0 +1,192 @@
+//This is code for an Electron data logger using an SEN0227. Oct. 8, 2019. James Douglas.
+//Second rev. Nov. 29, 2019. Reduce LED brightness, add SD card.
+//Author: James Douglas.
+
+// This #include statement was automatically added by the Particle IDE.
+#include <ThingSpeak.h>
+
+#include "uFire_SHT20.h"
+
+// This #include statement was automatically added by the Particle IDE. It is for the SD card.
+#include <SdFat.h>
+
+// This #include statement was automatically added by the Particle IDE.
+#include <RTClibrary.h>
+
+//SD card stuff
+// Use Primary SPI with DMA
+// SCK => A3, MISO => A4, MOSI => A5, SS => A2 (default)
+SdFat sd;
+const uint8_t chipSelect = SS;
+File dataLog;
+
+
+STARTUP(System.enableFeature(FEATURE_RETAINED_MEMORY));
+SYSTEM_MODE(SEMI_AUTOMATIC);
+
+//Thingspeak channel parameters
+String CHANNEL_ID = "600483";
+String WRITE_API_KEY = "MK8G45DZQZOX5L5G";
+
+String server = "api.thingspeak.com"; // ThingSpeak Server
+
+retained char data_r[1000] = ""; // This array is use to build and hold a comma separated string of data. 
+retained size_t counter;//this is for data integrity for sd card.
+
+size_t state = 0;
+size_t len;
+
+TCPClient client;
+
+uFire_SHT20 sht20;
+
+String temperature;
+String humidity;
+String shortTemperature;
+String shortHumidity;
+
+unsigned long old_time = millis();
+
+FuelGauge fuel;//battery stuff
+float stateOfCharge;
+
+void setup()
+{
+//Every time it wakes from deep sleep, this code will run.     
+    
+    //turn brightness of the LED down so it is less annoying. It still flashes upon wake, I can't control that from code.
+    RGB.control(true);
+    RGB.brightness(1); // 255 is highest brightness.
+    RGB.control(false);
+    
+    delay(2000);
+    Serial.begin(9600);
+    ThingSpeak.begin(client);
+
+    //SD card stuff    
+    Serial.begin(9600);
+    // Initialize SdFat 
+    if (!sd.begin(chipSelect, SPI_FULL_SPEED)) {
+        sd.initErrorHalt();
+    }
+    
+    len = strlen(data_r);
+
+    if (len == 0)//if this is first boot after power do some things. This is basically a setup function that only runs at boot rather than wake.
+    {
+        Particle.connect();
+        waitUntil(Particle.connected);//This is to set the clock, really. Otherwise the device doesn't know the time during the first hour.
+        Particle.publish("Penguin status", "BOOT!");
+        strcpy(data_r,"write_api_key="+WRITE_API_KEY+"&time_format=absolute&updates=");//add the header for the thingspeak update.
+        
+        //put a header on the data file
+        // open the file 
+        if (!dataLog.open("log.txt", O_RDWR | O_CREAT | O_AT_END)) {
+            sd.errorHalt("opening log.txt for write failed");
+        }
+      
+        //assuming it opened ok, write to it:
+        Serial.print("Writing to log.txt...");
+        dataLog.println("Point index, Temperature in deg C, Humidity in RH%, State of Charge as %full, Unix time stamp, YYYY-MM-DD-hh-mm-ss");
+        
+        // close the file:
+        dataLog.close();
+        Serial.println("Header Complete.");
+ 
+    }
+    
+}
+
+void loop()
+{
+    temperature = (String)sht20.temperature();//get data from the sensor.
+    humidity = (String)sht20.humidity();
+    
+    shortTemperature = temperature.substring(0,5);//cut off extra digits to save data.
+    shortHumidity = humidity.substring(0,5);
+    
+    stateOfCharge = fuel.getSoC();//check the battery
+    
+    Serial.println(shortTemperature + "°");//Print to serial for setup and troubleshooting - to reduce the sleep time and watch the data via serial monitor.
+    Serial.println(shortHumidity + " RH%");//Watch this data stream by plugging in the Electron via USB and using a serial monitor.
+    
+    //Format a block of data for sending to ThingSpeak.
+    strcat(data_r,String(Time.local())); // append absolute time stamp .
+    strcat(data_r,"%2C"); //comma
+    strcat(data_r,shortTemperature); //append data
+    strcat(data_r,"%2C"); //comma
+    strcat(data_r,shortHumidity); //append data
+    strcat(data_r,"%2C"); //comma
+    strcat(data_r,String(stateOfCharge)); //append data
+    strcat(data_r,"%7C"); // | between data points
+    
+    len = strlen(data_r);
+    
+    if (len>=600)//value is kind of arbitrary, it is how long it waits to send data.
+    {
+        senddata(data_r);
+    }
+    
+    writedata(); //write data to sd card.
+    
+    System.sleep(SLEEP_MODE_DEEP,300);//sleeps in seconds. 
+}
+
+
+
+void writedata(){
+    //Write to SD card
+    
+    // open the file 
+    if (!dataLog.open("log.txt", O_RDWR | O_CREAT | O_AT_END)) {
+        sd.errorHalt("opening log.txt for write failed");
+    }
+  
+    //assuming it opened ok, write to it:
+    Serial.print("Writing to log.txt...");
+    dataLog.println(String(counter) + "," + String(shortTemperature) + "," + String(shortHumidity) + "," + String(stateOfCharge) + "," + Time.local() + " " + Time.year() + "-" + Time.month() + "-" + Time.day() + "-" + Time.hour() + "-" + Time.minute() + "-" + Time.second());
+    counter++;
+    
+    // close the file:
+    dataLog.close();
+    Serial.println("Iteration Complete.");
+ 
+}
+
+
+
+void senddata(char* Buffer) {
+
+    Particle.connect();
+
+    if (waitFor(Particle.connected, 20000)){ // timeout after 20s if I cannot connect.
+//        Particle.publish("data length", String(len));
+        
+        String data_length = String(strlen(Buffer));
+        // Close any connection before sending a new request
+        client.stop();
+        // POST data to ThingSpeak
+        if (client.connect(server, 80)) {
+//            Particle.publish("connected to Thingspeak", "");
+            client.println("POST /channels/"+CHANNEL_ID+"/bulk_update HTTP/1.1");
+            client.println("Host: "+server);
+            client.println("User-Agent: mw.doc.bulk-update (Particle Photon)");
+            client.println("Connection: close");
+            client.println("Content-Type: application/x-www-form-urlencoded");
+            client.println("Content-Length: "+data_length);
+            client.println(); // hard return?
+            client.println(Buffer);
+            Particle.publish("data_sent", Buffer); //disabled to save bandwidth
+        }
+    }
+
+    //This is a 5s delay, during which it might be possible to reflash the Penguin. A delay is important, or the device can go to sleep before it sends the message!
+    old_time = millis();
+       while(millis() - old_time >= 5000){
+    }
+    
+    Particle.disconnect();
+
+    strcpy(data_r,"write_api_key="+WRITE_API_KEY+"&time_format=absolute&updates=");//clear the buffer and add a new header.
+
+}
