@@ -26,7 +26,7 @@ SYSTEM_MODE(SEMI_AUTOMATIC);
 
 //Thingspeak channel parameters
 String CHANNEL_ID = "600483";
-String WRITE_API_KEY = "MK8G45DZQZOX5L5G";
+String WRITE_API_KEY = "Write_API_Goes_Here";
 
 String server = "api.thingspeak.com"; // ThingSpeak Server
 
